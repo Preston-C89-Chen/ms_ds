@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# Build output
+dist/
+build/
+.vite/

@@ -1,0 +1,294 @@
+---
+title: "NYC 2021 Shootings"
+author: "P. Chen"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 5
+)
+```
+
+## Introduction
+
+This report looks at NYPD shooting incidents in 2021 and focuses on a few main questions:
+which boroughs had the most shootings,
+what time of day shootings were most common,
+where they tended to happen,
+and which demographic patterns appeared most often in the available records.
+
+## Data Source
+
+The data comes from the NYC Open Data shooting incident dataset:
+`https://data.cityofnewyork.us/`
+
+This report uses the 2021 portion of the historic NYPD shooting incident data. If the local CSV is not already present, the report downloads it from the NYC Open Data API and stores it in `data/nyc_2021_shootings_2021.csv` before running the analysis.
+
+```{r packages}
+required_packages <- c(
+  "dplyr", "ggplot2", "readr", "stringr",
+  "tidyr", "tibble", "knitr", "scales"
+)
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_packages) > 0) {
+  install.packages(missing_packages, repos = "https://cloud.r-project.org")
+}
+
+invisible(lapply(required_packages, library, character.only = TRUE))
+```
+
+```{r data-source}
+refresh_data <- FALSE
+
+snapshot_path <- file.path("data", "nyc_2021_shootings_2021.csv")
+
+api_url <- paste0(
+  "https://data.cityofnewyork.us/resource/833y-fsy8.csv?",
+  "$limit=50000&",
+  "$where=occur_date%20between%20%272021-01-01T00:00:00%27%20and%20%272021-12-31T23:59:59%27"
+)
+
+if (!dir.exists(dirname(snapshot_path))) {
+  dir.create(dirname(snapshot_path), recursive = TRUE)
+}
+
+if (!file.exists(snapshot_path) || isTRUE(refresh_data)) {
+  download.file(api_url, destfile = snapshot_path, mode = "wb", quiet = TRUE)
+}
+
+shootings_raw <- readr::read_csv(snapshot_path, show_col_types = FALSE)
+```
+
+## Data Overview
+
+The dataset contains 2,011 shooting incidents from 2021.
+It includes the date, time, borough, reported location type, and demographic fields for victims and perpetrators when that information was available.
+
+```{r prepare-data}
+shootings <- shootings_raw %>%
+  mutate(
+    occur_date = as.Date(occur_date),
+    year = as.integer(format(occur_date, "%Y")),
+    month = as.integer(format(occur_date, "%m")),
+    hour = as.integer(substr(occur_time, 1, 2)),
+    boro = stringr::str_to_title(boro),
+    location_desc = na_if(location_desc, ""),
+    perp_age_group = na_if(perp_age_group, ""),
+    perp_sex = na_if(perp_sex, ""),
+    perp_race = na_if(perp_race, ""),
+    vic_age_group = na_if(vic_age_group, ""),
+    vic_sex = na_if(vic_sex, ""),
+    vic_race = na_if(vic_race, "")
+  )
+
+summary_table <- tibble::tibble(
+  metric = c("Rows", "Columns", "Date range"),
+  value = c(
+    nrow(shootings),
+    ncol(shootings),
+    paste(min(shootings$occur_date), "to", max(shootings$occur_date))
+  )
+)
+
+knitr::kable(summary_table)
+```
+
+```{r glimpse-data}
+dplyr::glimpse(shootings)
+```
+
+## Data Notes
+
+Some fields are missing, especially in the perpetrator columns.
+Because of that, the report keeps the full dataset and only filters missing values in sections that need those specific fields.
+
+```{r missingness}
+missing_summary <- shootings %>%
+  summarise(
+    across(
+      c(
+        boro, location_desc,
+        perp_age_group, perp_sex, perp_race,
+        vic_age_group, vic_sex, vic_race
+      ),
+      ~ sum(is.na(.x))
+    )
+  ) %>%
+  tidyr::pivot_longer(
+    everything(),
+    names_to = "field",
+    values_to = "missing_values"
+  ) %>%
+  arrange(desc(missing_values))
+
+knitr::kable(missing_summary)
+```
+
+## Perpetrator and Victim Profiles
+
+The most common pattern in the available records appears among Black men between 25 and 44.
+That group shows up at the top of both the perpetrator and victim summaries.
+Other common groups include younger Black men and White Hispanic men in similar age ranges.
+
+```{r perpetrator-summary}
+perpetrators <- shootings %>%
+  filter(
+    !is.na(perp_race),
+    !is.na(perp_sex),
+    !is.na(perp_age_group)
+  ) %>%
+  count(perp_race, perp_sex, perp_age_group, sort = TRUE)
+
+knitr::kable(head(perpetrators, 10))
+```
+
+```{r victim-summary}
+victims <- shootings %>%
+  filter(
+    !is.na(vic_race),
+    !is.na(vic_sex),
+    !is.na(vic_age_group)
+  ) %>%
+  count(vic_race, vic_sex, vic_age_group, sort = TRUE)
+
+knitr::kable(head(victims, 10))
+```
+
+These summaries describe the reported incidents, but they do not explain the full cause of the violence on their own.
+They make more sense when read together with the borough and location patterns below.
+
+## Shootings by Borough
+
+The borough totals show that the Bronx had the most shootings in 2021, followed by Brooklyn.
+Manhattan and Queens had fewer incidents, and Staten Island had far fewer than the other boroughs.
+
+```{r shootings-by-borough}
+borough_summary <- shootings %>%
+  filter(!is.na(boro)) %>%
+  count(boro, sort = TRUE)
+
+knitr::kable(borough_summary)
+```
+
+```{r borough-plot}
+ggplot(borough_summary, aes(x = reorder(boro, n), y = n)) +
+  geom_col(fill = "#1f78b4") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "NYC Shootings by Borough in 2021",
+    x = "Borough",
+    y = "Number of incidents"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+The Bronx stands out clearly in the chart. 
+Shootings were not spread evenly across the city, and some neighborhoods carried much more of the burden than others.
+
+## Shootings by Time of Day
+
+The time pattern shows that shootings were most common late at night.
+The highest counts appear around 11 PM, with high totals continuing through the nearby overnight hours.
+
+```{r shootings-by-hour}
+hourly_summary <- shootings %>%
+  filter(!is.na(hour)) %>%
+  count(hour, sort = FALSE)
+
+knitr::kable(hourly_summary)
+```
+
+```{r hour-plot}
+ggplot(hourly_summary, aes(x = hour, y = n)) +
+  geom_line(color = "#d95f02", size = 1) +
+  geom_point(color = "#d95f02", size = 2) +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "NYC Shootings by Hour in 2021",
+    x = "Hour of day",
+    y = "Number of incidents"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+This is one of the clearest patterns in the data. Many incidents happened when the city was quieter and visibility was lower.
+
+## Shootings by Reported Location
+
+The location descriptions show that many incidents were reported in public housing and apartment buildings.
+That suggests a large share of shootings happened in residential spaces, not only in open public areas.
+
+```{r shootings-by-location}
+location_summary <- shootings %>%
+  filter(!is.na(location_desc)) %>%
+  count(location_desc, sort = TRUE)
+
+knitr::kable(head(location_summary, 10))
+```
+
+```{r location-plot}
+ggplot(head(location_summary, 8), aes(x = reorder(location_desc, n), y = n)) +
+  geom_col(fill = "#7570b3") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Most Common Reported Shooting Locations in 2021",
+    x = "Location type",
+    y = "Number of incidents"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+Public housing developments and apartment buildings appear most often in the location field.
+That fits the broader picture of shootings being concentrated in residential parts of the city.
+
+## Victim and Perpetrator Combinations
+
+Looking across borough, victim race, perpetrator race, 
+and age groups together helps show which combinations appeared most often in the records with more complete information.
+
+```{r incident-combinations}
+incident_combinations <- shootings %>%
+  filter(
+    !is.na(boro),
+    !is.na(vic_race),
+    !is.na(vic_age_group),
+    !is.na(perp_race),
+    !is.na(perp_age_group)
+  ) %>%
+  count(boro, perp_race, vic_race, perp_age_group, vic_age_group, sort = TRUE)
+
+knitr::kable(head(incident_combinations, 10))
+```
+
+These combined summaries show repeated patterns in the neighborhoods most affected by shootings.
+They suggest the issue is tied to place and circumstance, not just isolated incidents.
+
+## Conclusion
+
+The data shows a few clear patterns. The Bronx had the highest number of incidents,
+shootings were most common late at night, and many were reported in public housing and apartment buildings.
+In the available demographic records, Black men between 25 and 44 appeared most often among both perpetrators and victims.
+
+These patterns suggest the problem is closely tied to neighborhood conditions and to the environments in which people live.
+Poverty, education, housing conditions, and long-term disinvestment are more useful ways to think about the violence than simple demographic labels alone.
+The value of the data is that it helps track where the violence is concentrated and can support better decisions about prevention and community investment.
+
+## Session Notes
+
+```{r session-notes}
+sessionInfo()
+```
